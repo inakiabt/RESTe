@@ -1,3 +1,7 @@
+var Q = require('q');
+
+exports.Q = Q;
+
 // setup vars
 var config = {},
     requestHeaders = [];
@@ -31,6 +35,8 @@ function makeHttpRequest(url, method, params, onLoad, onError) {
     // debug the url
     log("::RESTE:: " + (config.baseUrl ? config.baseUrl + url : url));
 
+    var deferred = Q.defer();
+
     // create a client
     var http = Ti.Network.createHTTPClient();
 
@@ -47,30 +53,19 @@ function makeHttpRequest(url, method, params, onLoad, onError) {
 
     // events
     http.onload = function(e) {
-
-        if (config.onLoad) {
-            config.onLoad(JSON.parse(http.responseText), onLoad);
-        } else {
-            onLoad(JSON.parse(http.responseText));
+        try {
+            deferred.resolve(JSON.parse(http.responseText));
+        } catch (ex) {
+            deferred.reject(new Error("Received an error with invalid JSON: " + http.responseText));
         }
-
     };
 
     http.onerror = function(e) {
         e.url = url;
-
-        if (onError) {
-            // if we have an onError method, use it
-            onError(JSON.parse(http.responseText))
-        } else if (config.onError) {
-            // otherwise fallback to the one specified in config
-            config.onError(JSON.parse(http.responseText))
-        } else if (onLoad) {
-            // otherwise revert to the onLoad callback
-            onLoad(JSON.parse(http.responseText))
-        } else {
-            // and if that's not specified, error!
-            throw "RESTe :: No error handler / callback for: " + url;
+        try {
+            deferred.reject(JSON.parse(http.responseText));
+        } catch (ex) {
+            deferred.reject(new Error("Received an error with invalid JSON: " + http.responseText));
         }
     };
 
@@ -80,12 +75,35 @@ function makeHttpRequest(url, method, params, onLoad, onError) {
     } else {
         http.send();
     }
+
+    return deferred.promise
+        .then(function(response){
+            if (config.onLoad) {
+                config.onLoad(response, onLoad);
+            } else if (onLoad) {
+                onLoad(response);
+            }
+
+            return Q(response);
+        }, function(error){
+            if (onError) {
+                // if we have an onError method, use it
+                onError(error);
+            } else if (config.onError) {
+                // otherwise fallback to the one specified in config
+                config.onError(error);
+            } else if (onLoad) {
+                // otherwise revert to the onLoad callback
+                onLoad(error);
+            }
+            return Q.reject(error);
+        });
 }
 
 // set Requestheaders
 exports.setRequestHeaders = function(headers) {
     requestHeaders = [];
-    for (header in headers) {
+    for (var header in headers) {
         requestHeaders.push({
             name: header,
             value: headers[header]
@@ -97,13 +115,14 @@ exports.setRequestHeaders = function(headers) {
 exports.addMethod = function(args) {
     exports[args.name] = function(params, onLoad) {
 
+        var promise = Q();
         var body, url = args.post || args.get,
             onError;
 
         if (!onLoad && typeof(params) == "function") {
             onLoad = params;
         } else {
-            for (param in params) {
+            for (var param in params) {
 
                 if (param === "body") {
                     body = params[param];
@@ -125,25 +144,25 @@ exports.addMethod = function(args) {
             // change the callback to be the one specified
             onLoad = function(e) {
                 args.onLoad(e, originalOnLoad);
-            }
+            };
         }
 
         if (args.onError) {
             // change the callback to be the one specified
             onError = function(e) {
                 args.onError(e, onLoad);
-            }
+            };
         }
 
         if (args.expects) {
             // look for explicityly required parameters
             args.expects.forEach(function(expectedParam) {
                 if (!params[expectedParam]) {
-                    throw "RESTe :: missing parameter " + expectedParam + " for method " + args.name
+                    throw "RESTe :: missing parameter " + expectedParam + " for method " + args.name;
                 }
             });
 
-            makeHttpRequest(url, method, body, onLoad, onError);
+            promise = makeHttpRequest(url, method, body, onLoad, onError);
 
         } else {
             //work out which parameters are required
@@ -159,10 +178,12 @@ exports.addMethod = function(args) {
             }
 
             if (missing.length > 0) {
-                throw "RESTe :: missing parameter/s " + missing + " for method " + args.name
-            } else {                
-                makeHttpRequest(url, method, body, onLoad, onError);
+                throw "RESTe :: missing parameter/s " + missing + " for method " + args.name;
+            } else {
+                promise = makeHttpRequest(url, method, body, onLoad, onError);
             }
         }
+
+        return promise;
     };
 };
